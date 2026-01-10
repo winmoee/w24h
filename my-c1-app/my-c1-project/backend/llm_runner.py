@@ -79,10 +79,20 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
         print(f"[CONTEXT] Generating embedding for query: {user_query[:50]}...")
         query_embedding = await embed_text(user_query)
         
-        # Find episodes with embeddings
-        episodes_with_embeddings = list(episodes_collection.find({
-            "text_embedding": {"$exists": True, "$ne": None}
-        }))
+        # Find episodes with embeddings - use projection to only fetch needed fields
+        # Limit to reasonable number to avoid timeouts (e.g., 50 most recent)
+        episodes_with_embeddings = list(episodes_collection.find(
+            {"text_embedding": {"$exists": True, "$ne": None}},
+            {
+                "text_embedding": 1,
+                "episode_id": 1,
+                "app_name": 1,
+                "summary": 1,
+                "frame_count": 1,
+                "start_ts": 1,
+                "end_ts": 1
+            }
+        ).sort("start_ts", -1).limit(50))  # Limit to 50 most recent to avoid timeouts
         
         # Calculate similarity scores for episodes
         episode_scores = []
@@ -95,8 +105,9 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
         # Sort by similarity (descending)
         episode_scores.sort(key=lambda x: x[0], reverse=True)
         
-        # Get top episodes for reranking (take more than limit for reranking)
-        top_episodes = episode_scores[:limit * 2]  # Get 2x for reranking
+        # Get top episodes for reranking (take more than limit for reranking, but cap at reasonable number)
+        rerank_candidates = min(limit * 2, 20)  # Cap at 20 to avoid reranking too many
+        top_episodes = episode_scores[:rerank_candidates]
         
         # Prepare documents for reranking
         episode_documents = []
@@ -120,8 +131,13 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
         reranked_episodes = []
         if episode_documents:
             try:
-                print(f"[CONTEXT] Reranking {len(episode_documents)} episodes...")
-                rerank_results = await rerank(user_query, episode_documents, top_k=limit)
+                # Only rerank if we have a reasonable number of documents
+                if len(episode_documents) > 1:
+                    print(f"[CONTEXT] Reranking {len(episode_documents)} episodes...")
+                    rerank_results = await rerank(user_query, episode_documents, top_k=min(limit, len(episode_documents)))
+                else:
+                    # Skip reranking for single document
+                    rerank_results = [{"index": 0, "relevance_score": 1.0}]
                 
                 # Map reranked results back to episodes
                 for result in rerank_results:
@@ -137,24 +153,41 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
             reranked_episodes = list(episodes_collection.find({}).sort("start_ts", -1).limit(limit))
         
         # Find frames with embeddings (for visual context)
-        frames_with_embeddings = list(frames_collection.find({
-            "image_embedding": {"$exists": True, "$ne": None},
-            "blob_url": {"$exists": True, "$ne": None}
-        }))
-        
-        # Calculate similarity for frames (using query embedding - may not be perfect but gives some relevance)
-        frame_scores = []
-        for frame in frames_with_embeddings:
-            image_embedding = frame.get("image_embedding")
-            if image_embedding:
-                # Note: Query embedding is text-based, frame embedding is image-based
-                # This similarity may not be perfect, but provides some relevance signal
-                similarity = cosine_similarity(query_embedding, image_embedding)
-                frame_scores.append((similarity, frame))
-        
-        # Sort frames by similarity
-        frame_scores.sort(key=lambda x: x[0], reverse=True)
-        top_frames = [frame for _, frame in frame_scores[:limit]]
+        # Limit to recent frames and use projection to avoid loading large embedding vectors unnecessarily
+        # Only fetch a reasonable number to avoid timeouts
+        top_frames = []
+        try:
+            frames_with_embeddings = list(frames_collection.find(
+                {
+                    "image_embedding": {"$exists": True, "$ne": None},
+                    "blob_url": {"$exists": True, "$ne": None}
+                },
+                {
+                    "image_embedding": 1,
+                    "frame_id": 1,
+                    "app_name": 1,
+                    "window_title": 1,
+                    "ts": 1,
+                    "blob_url": 1
+                }
+            ).sort("ts", -1).limit(30))  # Limit to 30 most recent frames to avoid timeouts
+            
+            # Calculate similarity for frames (using query embedding - may not be perfect but gives some relevance)
+            frame_scores = []
+            for frame in frames_with_embeddings:
+                image_embedding = frame.get("image_embedding")
+                if image_embedding:
+                    # Note: Query embedding is text-based, frame embedding is image-based
+                    # This similarity may not be perfect, but provides some relevance signal
+                    similarity = cosine_similarity(query_embedding, image_embedding)
+                    frame_scores.append((similarity, frame))
+            
+            # Sort frames by similarity
+            frame_scores.sort(key=lambda x: x[0], reverse=True)
+            top_frames = [frame for _, frame in frame_scores[:limit]]
+        except Exception as frame_error:
+            print(f"[CONTEXT] Error fetching frames (skipping frames): {frame_error}")
+            # Skip frames if there's an error - episodes are more important
         
         # Build context string
         context_parts = []

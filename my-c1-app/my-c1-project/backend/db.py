@@ -42,9 +42,9 @@ def connect_db() -> Optional[Database]:
     try:
         client = MongoClient(
             uri,
-            serverSelectionTimeoutMS=10000,  # Reduced timeout
+            serverSelectionTimeoutMS=10000,  # Connection timeout
             connectTimeoutMS=10000,
-            socketTimeoutMS=10000,
+            socketTimeoutMS=20000,  # Increased to 20s for queries with embeddings
             retryWrites=True,
             retryReads=True,
         )
