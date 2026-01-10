@@ -4,8 +4,10 @@ from typing import (
     AsyncIterator,
     TypedDict,
     Literal,
+    Optional,
 )
 import os
+import math
 from openai import OpenAI
 from dotenv import load_dotenv  # type: ignore
 from datetime import datetime
@@ -14,6 +16,7 @@ from thread_store import Message, thread_store
 from openai.types.chat import ChatCompletionMessageParam
 from thesys_genui_sdk.context import get_assistant_message, write_content
 from db import get_frames_collection, get_episodes_collection
+from voyage import embed_text, rerank
 
 load_dotenv()
 
@@ -38,16 +41,32 @@ class ChatRequest(BaseModel):
     class Config:
         extra = "allow"  # Allow extra fields
 
+def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+    """
+    Calculate cosine similarity between two vectors
+    """
+    if len(vec1) != len(vec2):
+        return 0.0
+    
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    magnitude1 = math.sqrt(sum(a * a for a in vec1))
+    magnitude2 = math.sqrt(sum(a * a for a in vec2))
+    
+    if magnitude1 == 0 or magnitude2 == 0:
+        return 0.0
+    
+    return dot_product / (magnitude1 * magnitude2)
+
+
 async def get_relevant_context(user_query: str, limit: int = 10) -> str:
     """
-    Retrieves relevant context from MongoDB based on user query.
-    Returns a formatted string with context information.
+    Retrieves relevant context from MongoDB using semantic search with embeddings and reranking.
     
-    TODO: Customize this function to retrieve the context you want:
-    - Recent activity episodes
-    - Recent screenshots/frames
-    - App usage statistics
-    - Time-based queries
+    Process:
+    1. Generate query embedding
+    2. Find episodes/frames with embeddings using cosine similarity
+    3. Use Voyage AI reranker to improve relevance
+    4. Return formatted context string
     """
     frames_collection = get_frames_collection()
     episodes_collection = get_episodes_collection()
@@ -56,38 +75,160 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
         return "Database unavailable. Context cannot be retrieved."
     
     try:
-        # Get recent episodes and frames
-        recent_episodes = list(episodes_collection.find({}).sort("start_ts", -1).limit(5))
-        recent_frames = list(frames_collection.find({}).sort("ts", -1).limit(limit))
+        # Generate query embedding
+        print(f"[CONTEXT] Generating embedding for query: {user_query[:50]}...")
+        query_embedding = await embed_text(user_query)
         
+        # Find episodes with embeddings
+        episodes_with_embeddings = list(episodes_collection.find({
+            "text_embedding": {"$exists": True, "$ne": None}
+        }))
+        
+        # Calculate similarity scores for episodes
+        episode_scores = []
+        for episode in episodes_with_embeddings:
+            text_embedding = episode.get("text_embedding")
+            if text_embedding:
+                similarity = cosine_similarity(query_embedding, text_embedding)
+                episode_scores.append((similarity, episode))
+        
+        # Sort by similarity (descending)
+        episode_scores.sort(key=lambda x: x[0], reverse=True)
+        
+        # Get top episodes for reranking (take more than limit for reranking)
+        top_episodes = episode_scores[:limit * 2]  # Get 2x for reranking
+        
+        # Prepare documents for reranking
+        episode_documents = []
+        episode_metadata = []
+        for score, episode in top_episodes:
+            summary = episode.get("summary", "")
+            app_name = episode.get("app_name", "Unknown")
+            frame_count = episode.get("frame_count", 0)
+            start_ts = episode.get("start_ts", 0)
+            
+            # Create document text for reranking
+            doc_text = f"App: {app_name}. {summary}"
+            if start_ts:
+                start_date = datetime.fromtimestamp(start_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                doc_text += f" Started: {start_date}."
+            
+            episode_documents.append(doc_text)
+            episode_metadata.append(episode)
+        
+        # Rerank episodes if we have documents
+        reranked_episodes = []
+        if episode_documents:
+            try:
+                print(f"[CONTEXT] Reranking {len(episode_documents)} episodes...")
+                rerank_results = await rerank(user_query, episode_documents, top_k=limit)
+                
+                # Map reranked results back to episodes
+                for result in rerank_results:
+                    idx = result["index"]
+                    if idx < len(episode_metadata):
+                        reranked_episodes.append(episode_metadata[idx])
+            except Exception as e:
+                print(f"[CONTEXT] Reranking failed, using similarity scores: {e}")
+                # Fallback to similarity-based ranking
+                reranked_episodes = [ep for _, ep in top_episodes[:limit]]
+        else:
+            # No embeddings available, fallback to recent episodes
+            reranked_episodes = list(episodes_collection.find({}).sort("start_ts", -1).limit(limit))
+        
+        # Find frames with embeddings (for visual context)
+        frames_with_embeddings = list(frames_collection.find({
+            "image_embedding": {"$exists": True, "$ne": None},
+            "blob_url": {"$exists": True, "$ne": None}
+        }))
+        
+        # Calculate similarity for frames (using query embedding - may not be perfect but gives some relevance)
+        frame_scores = []
+        for frame in frames_with_embeddings:
+            image_embedding = frame.get("image_embedding")
+            if image_embedding:
+                # Note: Query embedding is text-based, frame embedding is image-based
+                # This similarity may not be perfect, but provides some relevance signal
+                similarity = cosine_similarity(query_embedding, image_embedding)
+                frame_scores.append((similarity, frame))
+        
+        # Sort frames by similarity
+        frame_scores.sort(key=lambda x: x[0], reverse=True)
+        top_frames = [frame for _, frame in frame_scores[:limit]]
+        
+        # Build context string
         context_parts = []
         
-        # Add episode context
-        if recent_episodes:
-            context_parts.append("Recent Activity Episodes:")
-            for episode in recent_episodes:
+        # Add relevant episodes
+        if reranked_episodes:
+            context_parts.append("Relevant Activity Episodes (semantically matched):")
+            for episode in reranked_episodes[:limit]:
                 app_name = episode.get("app_name", "Unknown")
+                summary = episode.get("summary", "No summary available")
                 frame_count = episode.get("frame_count", 0)
                 start_ts = episode.get("start_ts", 0)
+                end_ts = episode.get("end_ts")
+                
+                episode_info = f"- {app_name}: {summary}"
                 if start_ts:
                     start_date = datetime.fromtimestamp(start_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
-                    context_parts.append(f"- {app_name}: {frame_count} screenshots, started at {start_date}")
+                    episode_info += f" (Started: {start_date})"
+                if end_ts:
+                    end_date = datetime.fromtimestamp(end_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                    episode_info += f" (Ended: {end_date})"
+                
+                context_parts.append(episode_info)
         
-        # Add frame context (screenshots)
-        if recent_frames:
-            context_parts.append("\nRecent Screenshots:")
-            for frame in recent_frames:
+        # Add relevant frames
+        if top_frames:
+            context_parts.append("\nRelevant Screenshots (semantically matched):")
+            for frame in top_frames[:limit]:
                 app_name = frame.get("app_name", "Unknown")
                 window_title = frame.get("window_title", "N/A")
                 ts = frame.get("ts", 0)
+                blob_url = frame.get("blob_url")
+                
+                frame_info = f"- {app_name}"
+                if window_title and window_title != "N/A":
+                    frame_info += f" - {window_title}"
                 if ts:
                     frame_date = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
-                    context_parts.append(f"- {frame_date}: {app_name} - {window_title}")
+                    frame_info += f" ({frame_date})"
+                if blob_url:
+                    frame_info += f" [Image: {blob_url}]"
+                
+                context_parts.append(frame_info)
         
-        return "\n".join(context_parts) if context_parts else "No recent activity data available."
+        if not context_parts:
+            # Fallback to recent items if no semantic matches
+            recent_episodes = list(episodes_collection.find({}).sort("start_ts", -1).limit(3))
+            recent_frames = list(frames_collection.find({}).sort("ts", -1).limit(3))
+            
+            if recent_episodes or recent_frames:
+                context_parts.append("Recent Activity (fallback - no semantic matches found):")
+                for episode in recent_episodes:
+                    app_name = episode.get("app_name", "Unknown")
+                    frame_count = episode.get("frame_count", 0)
+                    context_parts.append(f"- {app_name}: {frame_count} screenshots")
+        
+        result = "\n".join(context_parts) if context_parts else "No activity data available."
+        print(f"[CONTEXT] Retrieved context with {len(reranked_episodes)} episodes and {len(top_frames)} frames")
+        return result
     
     except Exception as e:
         print(f"[CONTEXT] Error retrieving context: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fallback to simple recent items
+        try:
+            episodes_collection = get_episodes_collection()
+            frames_collection = get_frames_collection()
+            if episodes_collection and frames_collection:
+                recent_episodes = list(episodes_collection.find({}).sort("start_ts", -1).limit(3))
+                recent_frames = list(frames_collection.find({}).sort("ts", -1).limit(3))
+                return f"Error retrieving context: {str(e)}. Recent items: {len(recent_episodes)} episodes, {len(recent_frames)} frames."
+        except:
+            pass
         return f"Error retrieving context: {str(e)}"
 
 
@@ -105,12 +246,19 @@ async def generate_stream(chat_request: ChatRequest):
             "content": f"""You are a helpful assistant that helps users understand their computer activity.
             You have access to their screenshots and app usage data stored in MongoDB.
             
-            Current Context (from MongoDB):
+            The context below has been retrieved using semantic search (embeddings) and reranking to find
+            the most relevant episodes and frames based on the user's query.
+            
+            Current Context (semantically matched from MongoDB):
             {context}
             
-            Frames represent screenshots taken every minute.
-            Episodes group frames by app_name (new episode when app changes).
-            Be helpful and concise when answering questions about the user's activity."""
+            Data Structure:
+            - Frames: Screenshots taken every minute, with image embeddings for visual search
+            - Episodes: Groups of frames by app_name (new episode when app changes), with text embeddings and summaries
+            - Episodes include summaries with app name, duration, frame count, and window titles
+            
+            Use this context to answer questions about the user's activity. Be helpful, concise, and specific.
+            If the context includes image URLs, you can reference them when relevant."""
         }
         conversation_history.append(system_message)
         # Store system message in thread_store so it persists

@@ -4,12 +4,14 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from llm_runner import generate_stream, ChatRequest
 from thesys_genui_sdk.fast_api import with_c1_response
 from db import connect_db, get_frames_collection, get_episodes_collection, close_db
+from voyage import embed_image, embed_text, generate_episode_summary
 import httpx
 import os
 import time
 import random
 import string
 import uuid
+import asyncio
 from typing import Optional
 from datetime import datetime
 from dotenv import load_dotenv
@@ -85,6 +87,76 @@ last_app_name: Optional[str] = None
 current_episode_id: Optional[str] = None
 
 
+async def generate_frame_embedding(frame_id: str, blob_url: str, frames_collection):
+    """
+    Generate and store image embedding for a frame asynchronously
+    """
+    try:
+        print(f"[EMBEDDING] Generating image embedding for frame: {frame_id}")
+        embedding = await embed_image(blob_url)
+        
+        frames_collection.update_one(
+            {"frame_id": frame_id},
+            {"$set": {"image_embedding": embedding}}
+        )
+        print(f"[EMBEDDING] ✓ Image embedding stored for frame: {frame_id} ({len(embedding)} dimensions)")
+    except Exception as e:
+        print(f"[EMBEDDING] Error generating embedding for frame {frame_id}: {e}")
+
+
+async def generate_episode_embedding_and_summary(episode_id: str, episodes_collection, frames_collection):
+    """
+    Generate summary and text embedding for a completed episode
+    """
+    try:
+        # Get episode data
+        episode = episodes_collection.find_one({"episode_id": episode_id})
+        if not episode:
+            print(f"[EMBEDDING] Episode {episode_id} not found")
+            return
+        
+        app_name = episode.get("app_name", "Unknown")
+        frame_count = episode.get("frame_count", 0)
+        start_ts = episode.get("start_ts", 0)
+        end_ts = episode.get("end_ts")
+        frame_ids = episode.get("frame_ids", [])
+        
+        # Get window titles from frames
+        window_titles = []
+        if frame_ids:
+            frames = list(frames_collection.find(
+                {"frame_id": {"$in": frame_ids}},
+                {"window_title": 1}
+            ))
+            window_titles = [f.get("window_title") for f in frames if f.get("window_title")]
+        
+        # Generate summary
+        print(f"[EMBEDDING] Generating summary for episode: {episode_id}")
+        summary = await generate_episode_summary(
+            app_name=app_name,
+            frame_count=frame_count,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            window_titles=window_titles
+        )
+        
+        # Generate text embedding from summary
+        print(f"[EMBEDDING] Generating text embedding for episode: {episode_id}")
+        text_embedding = await embed_text(summary)
+        
+        # Update episode with summary and embedding
+        episodes_collection.update_one(
+            {"episode_id": episode_id},
+            {"$set": {
+                "summary": summary,
+                "text_embedding": text_embedding
+            }}
+        )
+        print(f"[EMBEDDING] ✓ Summary and embedding stored for episode: {episode_id} ({len(text_embedding)} dimensions)")
+    except Exception as e:
+        print(f"[EMBEDDING] Error generating embedding for episode {episode_id}: {e}")
+
+
 @app.post("/api/activity")
 async def receive_activity(app_info: AppInfo):
     """
@@ -110,11 +182,19 @@ async def receive_activity(app_info: AppInfo):
                 try:
                     # If there was a previous episode, close it
                     if current_episode_id and last_app_name:
+                        end_ts = int(time.time() * 1000)
                         episodes_collection.update_one(
                             {"episode_id": current_episode_id},
-                            {"$set": {"end_ts": int(time.time() * 1000), "updated_at": datetime.utcnow()}}
+                            {"$set": {"end_ts": end_ts, "updated_at": datetime.utcnow()}}
                         )
                         print(f"[ACTIVITY] Closed episode in DB: {current_episode_id}")
+                        
+                        # Generate summary and embedding for closed episode (async, don't wait)
+                        frames_collection = get_frames_collection()
+                        if frames_collection is not None:
+                            asyncio.create_task(generate_episode_embedding_and_summary(
+                                current_episode_id, episodes_collection, frames_collection
+                            ))
                     
                     # Create new episode
                     new_episode_id = str(uuid.uuid4())
@@ -278,6 +358,11 @@ async def screenshot_upload(
                             }}
                         )
                         print(f"[SERVER] Closed episode in DB: {current_episode_id} for app: {last_app_name}")
+                        
+                        # Generate summary and embedding for closed episode (async, don't wait)
+                        asyncio.create_task(generate_episode_embedding_and_summary(
+                            current_episode_id, episodes_collection, frames_collection
+                        ))
                     
                     # Create new episode for new app_name
                     new_episode_id = str(uuid.uuid4())
@@ -331,6 +416,12 @@ async def screenshot_upload(
                 
                 frames_collection.insert_one(frame_doc)
                 print(f"[SERVER] ✓ Frame stored in MongoDB: {frame_id}")
+                
+                # Generate image embedding if blob_url is available (async, don't wait)
+                if blob_url:
+                    asyncio.create_task(generate_frame_embedding(
+                        frame_id, blob_url, frames_collection
+                    ))
                 
                 # Update episode to include this frame
                 episodes_collection.update_one(

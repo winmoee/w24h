@@ -14,6 +14,7 @@
 --   blob_pathname: string (optional),
 --   file_size: number, -- bytes
 --   content_type: string, -- 'image/png'
+--   image_embedding: number[] (optional), -- Vector embedding from Voyage AI (1024 dimensions)
 --   created_at: Date
 -- }
 
@@ -27,6 +28,8 @@
 --   start_ts: number (milliseconds), -- When episode started
 --   end_ts: number (milliseconds, nullable), -- When episode ended (set when app_name changes)
 --   frame_count: number, -- Number of frames in this episode
+--   summary: string (optional), -- Auto-generated text summary of the episode
+--   text_embedding: number[] (optional), -- Vector embedding from Voyage AI (1024 dimensions)
 --   created_at: Date,
 --   updated_at: Date
 -- }
