@@ -76,6 +76,69 @@ ipcMain.handle('get-screen-info', () => {
   return size; // Use actual display size, not work area
 });
 
+// Handle active window info request from renderer (for episode tracking)
+ipcMain.handle('get-active-window', async () => {
+  try {
+    // Get active window using desktopCapturer or platform-specific methods
+    const platform = process.platform;
+    
+    if (platform === 'darwin') {
+      // macOS - use AppleScript
+      const { exec } = require('child_process');
+      const { promisify } = require('util');
+      const execAsync = promisify(exec);
+      
+      try {
+        const appScript = `
+          tell application "System Events"
+            set frontApp to name of first application process whose frontmost is true
+          end tell
+          return frontApp
+        `;
+        const appResult = await execAsync(`osascript -e '${appScript}'`);
+        const appName = appResult.stdout.trim();
+        
+        // Try to get window title
+        let windowTitle = null;
+        try {
+          const titleScript = `
+            tell application "System Events"
+              tell process "${appName}"
+                set windowTitle to name of first window
+              end tell
+            end tell
+            return windowTitle
+          `;
+          const titleResult = await execAsync(`osascript -e '${titleScript}'`);
+          windowTitle = titleResult.stdout.trim() || null;
+        } catch (e) {
+          // Window title might not be available
+        }
+        
+        return {
+          appName: appName || 'Unknown',
+          windowTitle: windowTitle,
+        };
+      } catch (err) {
+        console.error('[MAIN] macOS window detection error:', err);
+        return { appName: 'Unknown', windowTitle: null };
+      }
+    } else {
+      // Windows/Linux - placeholder for now
+      return {
+        appName: 'Unknown',
+        windowTitle: null,
+      };
+    }
+  } catch (err) {
+    console.error('[MAIN] Error getting active window:', err);
+    return {
+      appName: 'Unknown',
+      windowTitle: null,
+    };
+  }
+});
+
 // Handle screenshot save confirmation from renderer
 ipcMain.on('screenshot-saved', (event, filePath, success, error) => {
   if (success) {
@@ -92,21 +155,44 @@ ipcMain.on('screenshot-saved', (event, filePath, success, error) => {
   }
 });
 
+// Configuration for Vercel Blob upload via Python backend
+// Set this to your Python backend URL or leave null to disable uploads
+// You can set it via environment variable: VERCEL_BLOB_UPLOAD_URL=http://localhost:8000/api/screenshot-upload
+// Default to localhost:8000 in development (when NODE_ENV is not 'production')
+const VERCEL_BLOB_UPLOAD_URL = process.env.VERCEL_BLOB_UPLOAD_URL || 
+                                 (process.env.NODE_ENV !== 'production' ? 'http://localhost:8000/api/screenshot-upload' : null);
+
 // Function to trigger screenshot
 function takeScreenshot() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     const savePath = path.join(app.getPath('documents'), 'Screenshots');
     console.log('[MAIN] Triggering screenshot - Save path:', savePath);
+    console.log('[MAIN] Upload URL being sent to renderer:', VERCEL_BLOB_UPLOAD_URL || 'null');
     // Ensure directory exists from main process too
     if (!fs.existsSync(savePath)) {
       fs.mkdirSync(savePath, { recursive: true });
       console.log('[MAIN] Created directory:', savePath);
     }
-    mainWindow.webContents.send('capture', savePath);
+    // Send both save path and upload URL to renderer
+    mainWindow.webContents.send('capture', savePath, VERCEL_BLOB_UPLOAD_URL);
   } else {
     console.error('[MAIN] Cannot take screenshot - window not ready');
   }
 }
+
+// Handle screenshot upload confirmation from renderer
+ipcMain.on('screenshot-uploaded', (event, localPath, blobUrl) => {
+  console.log('[MAIN] ✓ Screenshot uploaded to Vercel Blob');
+  console.log('[MAIN] Local path:', localPath);
+  console.log('[MAIN] Blob URL:', blobUrl);
+  // TODO: Store blob URL in your database, link to user, etc.
+});
+
+// Forward renderer console logs to main process for visibility
+ipcMain.on('renderer-log', (event, level, ...args) => {
+  const message = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+  console.log(`[RENDERER-${level}] ${message}`);
+});
 
 app.on('ready', () => {
   mainWindow = new BrowserWindow({
@@ -152,6 +238,17 @@ app.on('ready', () => {
 
   console.log('Screenshot app started. Taking screenshots every 1 minute...');
   console.log('Screenshots will be saved to:', path.join(app.getPath('documents'), 'Screenshots'));
+  console.log('[MAIN] Upload URL configured:', VERCEL_BLOB_UPLOAD_URL || 'DISABLED');
+  if (!VERCEL_BLOB_UPLOAD_URL) {
+    console.log('[MAIN] Upload is disabled. To enable, set VERCEL_BLOB_UPLOAD_URL environment variable or edit main.js');
+  }
+
+  // Send activity server URL to renderer
+  const activityServerUrl = process.env.ACTIVITY_SERVER_URL || 'http://localhost:8000/api/activity';
+  mainWindow.webContents.once('did-finish-load', () => {
+    mainWindow.webContents.send('init-activity-tracker', activityServerUrl);
+    console.log('[MAIN] Activity tracker initialized with server:', activityServerUrl);
+  });
 });
 
 // Handle app lifecycle

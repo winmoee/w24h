@@ -3,6 +3,98 @@ const path = require('path');
 const fs = require('fs');
 const { ipcRenderer: ipc } = electron;
 
+// Helper to log to both console and main process
+function logToMain(level, ...args) {
+  console.log(`[RENDERER] ${level}:`, ...args);
+  ipc.send('renderer-log', level, ...args);
+}
+
+// Helper to convert Buffer to File object for Vercel Blob upload
+function bufferToFile(buffer, filename, mimeType = 'image/png') {
+  // In Electron renderer (Chromium), File and Blob are available
+  // Convert Node.js Buffer to Uint8Array for Blob/File
+  const uint8Array = new Uint8Array(buffer);
+  const blob = new Blob([uint8Array], { type: mimeType });
+  // File constructor is available in Electron renderer
+  return new File([blob], filename, { 
+    type: mimeType, 
+    lastModified: Date.now() 
+  });
+}
+
+// Upload screenshot to backend (which uploads to Vercel Blob and stores in MongoDB)
+async function uploadScreenshotToVercel(pngBuffer, filename, localPath, uploadUrl, appName, windowTitle) {
+  if (!uploadUrl) {
+    logToMain('WARN', 'No upload URL configured, skipping upload');
+    return null;
+  }
+
+  try {
+    logToMain('INFO', 'Creating FormData for upload...');
+    
+    // Convert Buffer to File for FormData
+    const file = bufferToFile(pngBuffer, filename, 'image/png');
+    
+    // Create FormData to send file to backend
+    const formData = new FormData();
+    formData.append('file', file, filename);
+    
+    // Optional: specify pathname
+    const timestamp = Date.now();
+    const pathname = `screenshots/${timestamp}-${filename}`;
+    formData.append('pathname', pathname);
+    
+    // Send app_name and window_title for episode tracking
+    if (appName) {
+      formData.append('app_name', appName);
+    }
+    if (windowTitle) {
+      formData.append('window_title', windowTitle);
+    }
+    if (localPath) {
+      formData.append('local_path', localPath);
+    }
+    
+    logToMain('INFO', 'Uploading file to backend:', filename);
+    logToMain('INFO', 'File size:', pngBuffer.length, 'bytes');
+    logToMain('INFO', 'App name:', appName);
+    logToMain('INFO', 'Window title:', windowTitle || 'N/A');
+    logToMain('INFO', 'Local path:', localPath);
+    
+    // Upload to Python backend
+    logToMain('INFO', 'Sending POST request to backend...');
+    const response = await fetch(uploadUrl, {
+      method: 'POST',
+      body: formData,
+    });
+    
+    logToMain('INFO', 'Response received - Status:', response.status, response.statusText);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      logToMain('ERROR', 'Upload failed with status:', response.status);
+      logToMain('ERROR', 'Error response:', errorText);
+      throw new Error(`Upload failed: ${response.status} - ${errorText}`);
+    }
+    
+    const result = await response.json();
+    
+    logToMain('SUCCESS', 'Screenshot uploaded and stored successfully!');
+    logToMain('INFO', 'Frame ID:', result.frame_id);
+    logToMain('INFO', 'Episode ID:', result.episode_id);
+    logToMain('INFO', 'Blob URL:', result.url || 'N/A');
+    
+    return result;
+  } catch (err) {
+    logToMain('ERROR', 'Failed to upload to backend:', err.message);
+    if (err.stack) {
+      logToMain('ERROR', 'Stack trace:', err.stack);
+    }
+    // Don't throw - allow local save to succeed even if upload fails
+    return null;
+  }
+}
+
 function ensureDirectoryExists(dirPath) {
   console.log('[RENDERER] Checking directory:', dirPath);
   try {
@@ -81,11 +173,13 @@ function formatDateForFilename() {
   return `${year}-${month}-${day}_${hours}-${minutes}-${seconds}`;
 }
 
-async function onCapture(evt, targetPath) {
-  console.log('[RENDERER] ========================================');
-  console.log('[RENDERER] CAPTURE REQUESTED');
-  console.log('[RENDERER] Target path:', targetPath);
-  console.log('[RENDERER] ========================================');
+async function onCapture(evt, targetPath, uploadUrl = null) {
+  logToMain('INFO', '========================================');
+  logToMain('INFO', 'CAPTURE REQUESTED');
+  logToMain('INFO', 'Target path:', targetPath);
+  logToMain('INFO', 'Upload URL:', uploadUrl || 'Not configured');
+  logToMain('INFO', 'Upload URL type:', typeof uploadUrl);
+  logToMain('INFO', '========================================');
   
   try {
     // Step 1: Ensure the directory exists
@@ -128,9 +222,54 @@ async function onCapture(evt, targetPath) {
     const filePath = path.join(targetPath, filename);
     console.log('[RENDERER] Full file path:', filePath);
     
-    // Step 6: Write file
-    console.log('[RENDERER] Step 6: Writing file...');
+    // Step 6: Write file locally
+    console.log('[RENDERER] Step 6: Writing file locally...');
     await writeScreenshot(png, filePath);
+    
+    // Step 7: Get current app_name for episode tracking
+    let appName = 'Unknown';
+    let windowTitle = null;
+    try {
+      const windowInfo = await getCurrentWindowInfo();
+      if (windowInfo && windowInfo.appName) {
+        appName = windowInfo.appName;
+        windowTitle = windowInfo.windowTitle || null;
+      }
+      logToMain('INFO', 'Active app:', appName, 'Window:', windowTitle || 'N/A');
+    } catch (err) {
+      console.warn('[RENDERER] Could not get active window info:', err.message);
+    }
+    
+    // Step 8: Upload to backend (non-blocking, don't wait)
+    if (uploadUrl && uploadUrl !== 'null' && uploadUrl !== 'undefined' && uploadUrl !== null && uploadUrl !== undefined) {
+      logToMain('INFO', 'Step 8: Starting upload to backend...');
+      logToMain('INFO', 'Upload URL:', uploadUrl);
+      logToMain('INFO', 'App name:', appName);
+      logToMain('INFO', 'Window title:', windowTitle || 'N/A');
+      logToMain('INFO', 'File size:', png.length, 'bytes');
+      
+      uploadScreenshotToVercel(png, filename, filePath, uploadUrl, appName, windowTitle)
+        .then((result) => {
+          if (result && result.success) {
+            logToMain('SUCCESS', 'Upload completed - Frame ID:', result.frame_id);
+            logToMain('SUCCESS', 'Episode ID:', result.episode_id);
+            logToMain('SUCCESS', 'Blob URL:', result.url || 'N/A');
+            // Notify main process of successful upload
+            ipc.send('screenshot-uploaded', filePath, result.url || null);
+          } else {
+            logToMain('WARN', 'Upload returned unsuccessful result');
+          }
+        })
+        .catch((uploadErr) => {
+          logToMain('ERROR', 'Upload error:', uploadErr.message);
+          logToMain('ERROR', 'Upload error details:', uploadErr.toString());
+          if (uploadErr.stack) {
+            logToMain('ERROR', 'Stack:', uploadErr.stack);
+          }
+        });
+    } else {
+      logToMain('WARN', 'Skipping upload - Upload URL not configured');
+    }
     
     console.log('[RENDERER] ========================================');
     console.log('[RENDERER] ✓ CAPTURE COMPLETED SUCCESSFULLY');
@@ -146,3 +285,37 @@ async function onCapture(evt, targetPath) {
 }
 
 ipc.on('capture', onCapture);
+
+// Initialize activity tracker when requested from main process
+let activityTracker = null;
+ipc.on('init-activity-tracker', (evt, serverUrl) => {
+  try {
+    const ActivityTracker = require('./activityTracker');
+    activityTracker = new ActivityTracker(serverUrl);
+    activityTracker.start();
+    logToMain('INFO', 'Activity tracker started with server:', serverUrl);
+  } catch (error) {
+    logToMain('ERROR', 'Failed to initialize activity tracker:', error.message);
+    console.error('[RENDERER] Activity tracker error:', error);
+  }
+});
+
+// Helper to get current window info (from activity tracker or IPC)
+async function getCurrentWindowInfo() {
+  // Try to use activity tracker first
+  if (activityTracker && typeof activityTracker.getCurrentWindow === 'function') {
+    try {
+      return await activityTracker.getCurrentWindow();
+    } catch (err) {
+      console.warn('[RENDERER] Activity tracker getCurrentWindow failed:', err);
+    }
+  }
+  
+  // Fallback to IPC
+  try {
+    return await ipc.invoke('get-active-window');
+  } catch (err) {
+    console.warn('[RENDERER] IPC get-active-window failed:', err);
+    return { appName: 'Unknown', windowTitle: null };
+  }
+}

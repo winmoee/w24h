@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@vercel/blob": "^2.0.0",
     "electron": "^28.0.0"
   },
   "devDependencies": {
