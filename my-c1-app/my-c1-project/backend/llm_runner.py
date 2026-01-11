@@ -58,7 +58,7 @@ def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     return dot_product / (magnitude1 * magnitude2)
 
 
-async def get_relevant_context(user_query: str, limit: int = 10) -> str:
+async def get_relevant_context(user_query: str, limit: int = 10) -> tuple[str, list[str]]:
     """
     Retrieves relevant context from MongoDB using semantic search with embeddings and reranking.
     
@@ -72,7 +72,7 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
     episodes_collection = get_episodes_collection()
     
     if frames_collection is None or episodes_collection is None:
-        return "Database unavailable. Context cannot be retrieved."
+        return "Database unavailable. Context cannot be retrieved.", []
     
     try:
         # Generate query embedding
@@ -215,20 +215,20 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
         # Add relevant frames
         if top_frames:
             context_parts.append("\nRelevant Screenshots (semantically matched):")
-            for frame in top_frames[:limit]:
+            for i, frame in enumerate(top_frames[:limit], 1):
                 app_name = frame.get("app_name", "Unknown")
                 window_title = frame.get("window_title", "N/A")
                 ts = frame.get("ts", 0)
                 blob_url = frame.get("blob_url")
                 
-                frame_info = f"- {app_name}"
+                frame_info = f"{i}. {app_name}"
                 if window_title and window_title != "N/A":
                     frame_info += f" - {window_title}"
                 if ts:
                     frame_date = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
                     frame_info += f" ({frame_date})"
                 if blob_url:
-                    frame_info += f" [Image: {blob_url}]"
+                    frame_info += f"\n   Screenshot URL: {blob_url}"
                 
                 context_parts.append(frame_info)
         
@@ -245,8 +245,17 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
                     context_parts.append(f"- {app_name}: {frame_count} screenshots")
         
         result = "\n".join(context_parts) if context_parts else "No activity data available."
+        
+        # Collect screenshot URLs from top frames for display
+        screenshot_urls = []
+        for frame in top_frames[:limit]:
+            blob_url = frame.get("blob_url")
+            if blob_url:
+                screenshot_urls.append(blob_url)
+        
         print(f"[CONTEXT] Retrieved context with {len(reranked_episodes)} episodes and {len(top_frames)} frames")
-        return result
+        print(f"[CONTEXT] Found {len(screenshot_urls)} screenshot URLs for display")
+        return result, screenshot_urls
     
     except Exception as e:
         print(f"[CONTEXT] Error retrieving context: {e}")
@@ -262,7 +271,7 @@ async def get_relevant_context(user_query: str, limit: int = 10) -> str:
                 return f"Error retrieving context: {str(e)}. Recent items: {len(recent_episodes)} episodes, {len(recent_frames)} frames."
         except:
             pass
-        return f"Error retrieving context: {str(e)}"
+        return f"Error retrieving context: {str(e)}", []
 
 
 async def generate_stream(chat_request: ChatRequest):
@@ -270,7 +279,16 @@ async def generate_stream(chat_request: ChatRequest):
     
     # Get relevant context from MongoDB (frames/episodes)
     user_query = chat_request.prompt['content']
-    context = await get_relevant_context(user_query)
+    context, screenshot_urls = await get_relevant_context(user_query)
+    
+    # Build screenshot context for the LLM
+    screenshot_context = ""
+    if screenshot_urls:
+        screenshot_context = f"\n\nRelevant Screenshots Available (use markdown image syntax to display):\n"
+        for i, url in enumerate(screenshot_urls, 1):
+            screenshot_context += f"{i}. {url}\n"
+        screenshot_context += "\nWhen referencing these screenshots in your response, use markdown image syntax: ![Description of what the screenshot shows](URL)\n"
+        screenshot_context += "Display the screenshots that support your answer. Use descriptive alt text that explains what the screenshot shows."
     
     # Add context as a system message if this is the first message in the conversation
     if not conversation_history:
@@ -284,6 +302,7 @@ async def generate_stream(chat_request: ChatRequest):
             
             Current Context (semantically matched from MongoDB):
             {context}
+            {screenshot_context}
             
             Data Structure:
             - Frames: Screenshots taken every minute, with image embeddings for visual search
@@ -291,7 +310,8 @@ async def generate_stream(chat_request: ChatRequest):
             - Episodes include summaries with app name, duration, frame count, and window titles
             
             Use this context to answer questions about the user's activity. Be helpful, concise, and specific.
-            If the context includes image URLs, you can reference them when relevant."""
+            When you reference screenshots that support your answer, display them using markdown image syntax: ![Description](URL)
+            Only include screenshots that are directly relevant to answering the user's question."""
         }
         conversation_history.append(system_message)
         # Store system message in thread_store so it persists
@@ -299,6 +319,14 @@ async def generate_stream(chat_request: ChatRequest):
             openai_message=system_message,
             id=None
         ))
+    else:
+        # For subsequent messages, add context as a user message before the actual query
+        # This ensures the LLM has access to current context for each query
+        context_message: ChatCompletionMessageParam = {
+            "role": "user",
+            "content": f"[Context for this query - retrieved using semantic search]\n{context}{screenshot_context}"
+        }
+        conversation_history.append(context_message)
     
     # Append user's prompt
     conversation_history.append(chat_request.prompt)
