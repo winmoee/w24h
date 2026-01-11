@@ -224,19 +224,29 @@ async def rerank(query: str, documents: list[str], model: Optional[str] = None, 
         response.raise_for_status()
         data = response.json()
         
-        if not data.get("results"):
+        # Voyage AI reranker API returns results in 'data' field
+        rerank_data = data.get("data", [])
+        
+        if not rerank_data:
             return []
         
-        # Format results: each result has 'index', 'document', 'relevance_score'
+        # Format results: each result has 'index' and 'relevance_score'
+        # Note: The API doesn't return the document text, just index and score
         results = []
-        for result in data["results"]:
+        for result in rerank_data:
+            index = result.get("index")
+            score = result.get("relevance_score", 0.0)
+            
+            # Get the document text from the original documents list
+            document = documents[index] if index < len(documents) else ""
+            
             results.append({
-                "index": result.get("index"),
-                "document": result.get("document", ""),
-                "relevance_score": result.get("relevance_score", 0.0)
+                "index": index,
+                "document": document,
+                "relevance_score": score
             })
         
-        # Sort by relevance score (descending)
+        # Sort by relevance score (descending) - API already returns sorted, but ensure it
         results.sort(key=lambda x: x["relevance_score"], reverse=True)
         
         return results

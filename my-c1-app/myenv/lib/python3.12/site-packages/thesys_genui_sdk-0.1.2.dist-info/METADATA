@@ -1,0 +1,122 @@
+Metadata-Version: 2.1
+Name: thesys_genui_sdk
+Version: 0.1.2
+Summary: Thesys GenUI utilities
+Author: Thesys Inc.
+Author-email: engineering@thesys.dev
+Requires-Python: >=3.10,<4.0
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Description-Content-Type: text/markdown
+
+# Thesys GenUI SDK
+
+⚡ Building application with generative UI ⚡
+
+## Quick Install
+
+`pip install thesys_genui_sdk`
+
+## 🤔 What is this?
+
+Thesys is a developer platform for building generative UI applications. There are 2 major components of building your own generative UI application:
+
+- API - [Thesys C1 API](https://docs.thesys.dev/api-reference/getting-started) is our flagship Generative UI API that leverages the power of LLMs to generate UI on the fly.
+
+- Frontend - [GenUI SDK](https://www.npmjs.com/package/@thesysai/genui-sdk) is our React framework that integrates well with the C1 API and allows you to present your end user with a live app that they can interact with.
+
+This library is designed to help you build your own generative UI applications by providing you with the tools to build your own application on top of Thesys C1 API.
+
+Read more abount C1 api [here](https://docs.thesys.dev) and what is genui [here](https://docs.thesys.dev/guides/genui)
+
+**🤖 Chatbots**
+
+- [Documentation](https://docs.thesys.dev/guides/conversational/)
+- [Fast api template](https://github.com/thesysdev/template-c1-fastapi)
+- [Examples](https://github.com/thesysdev/examples)
+
+## 📖 Documentation
+
+**Streaming response with fast-api:**
+
+1. wrap your route with the `with_c1_response` decorator:
+2. use `write_content`, `write_think_item`, `write_custom_markdown` from `thesys_genui_sdk.context` to write to the response stream
+3. use `get_assistant_message` from `thesys_genui_sdk.context` to get the assistant message for the history
+
+```python
+from thesys_genui_sdk.fast_api import with_c1_response
+from thesys_genui_sdk.context import write_content, get_assistant_message, write_think_item
+
+@app.post("/generate_ui")
+# decorator to wrap the route with the c1 response instance
+# this will create a c1 response instance and make it available in the context
+# this expects an async function which will use write_content, write_think_item, write_custom_markdown
+# to write to the response stream
+@with_c1_response()
+async def generate_ui(request: Request):
+    await generate_llm_response(request)
+
+
+async def generate_llm_response(request: Request):
+    stream = openai_client.chat. ....
+
+    # write a think item to the response stream
+    await write_think_item("Thinking", "I am thinking about the user's request")
+
+    for chunk in stream:
+        delta = chunk.choices[0].delta
+        finish_reason = chunk.choices[0].finish_reason
+
+        if delta and delta.content:
+            # write a content chunk to the response stream
+            await write_content(delta.content)
+
+        if finish_reason:
+            # get the assistant message for the history
+            assistant_message_for_history = get_assistant_message()
+            # store the assistant message for the history
+
+```
+
+**Framework independent response streaming:**
+
+1. create a c1 response instance
+2. create an async task and use `write_content`, `write_think_item`, `write_custom_markdown` methods on the c1 response instance to write to the response stream
+3. use `c1_response.get_assistant_message` to get the assistant message for the history
+
+```python
+from thesys_genui_sdk.context import C1Response
+
+c1_response = C1Response()
+
+async def generate_llm_response():
+    # write a think item to the response stream
+    await c1_response.write_think_item("Thinking", "I am thinking about the user's request")
+
+    # write a markdown chunk to the response stream
+    await c1_response.write_custom_markdown("## Hello, world!")
+
+    for chunk in stream:
+            delta = chunk.choices[0].delta
+            finish_reason = chunk.choices[0].finish_reason
+
+            if delta and delta.content:
+                # write a content chunk to the response stream
+                await c1_response.write_content(delta.content)
+
+            if finish_reason:
+                # get the assistant message for the history
+                assistant_message_for_history = c1_response.get_assistant_message()
+                # store the assistant message for the history
+
+    # end the response stream
+    await c1_response.end()
+
+asyncio.create_task(generate_llm_response())
+
+# use the stream from c1_response to send to the client
+stream = c1_response.stream()
+```
+

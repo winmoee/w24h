@@ -4,254 +4,306 @@ Work 24 Hours - A context engine for human work episodes with semantic search ca
 
 ## Overview
 
-This backend system stores structured work episodes (with timestamps, tags, notes, and screenshots) and provides semantic search capabilities using MongoDB Atlas Vector Search and Voyage AI embeddings.
+This system captures computer screenshots and activity data, structures them into meaningful "episodes," and makes them retrievable through an AI-powered chat interface. It provides multimodal work memory that helps users understand their past activity and context.
 
-### MVP Step 1 Features
+### Key Features
 
-- ✅ Episode creation with automatic text embeddings
-- ✅ Frame (screenshot) creation and linking to episodes
-- ✅ Natural language query endpoint using vector search
-- ✅ MongoDB Atlas integration with vector search support
+- ✅ Automatic screenshot capture every minute via Electron app
+- ✅ Episode creation with automatic grouping by application
+- ✅ Automatic text and image embeddings using Voyage AI
+- ✅ Semantic search with reranking for relevant context retrieval
+- ✅ AI chat interface that displays relevant screenshots inline
+- ✅ MongoDB Atlas integration for data storage
+
+## Architecture
+
+The system consists of three main components:
+
+1. **Electron App** (`screenshot-app-electron-master/`): Desktop application that captures screenshots and activity data
+2. **FastAPI Backend** (`my-c1-app/my-c1-project/backend/`): Python backend that receives screenshots, stores data in MongoDB, and provides chat API
+3. **Next.js Frontend** (`my-c1-app/src/`): Web interface with chat capabilities
+
+### Data Flow
+
+1. Electron app captures screenshots every minute
+2. Screenshots uploaded to Vercel Blob via `/api/screenshot-upload`
+3. Frame documents created in MongoDB `frames` collection
+4. Episodes automatically created/updated based on app name changes
+5. Embeddings automatically generated for frames (images) and episodes (text summaries)
+6. Chat interface queries MongoDB for context via semantic search and reranking
 
 ## Tech Stack
 
-- **Runtime**: Node.js 18+
+### Backend
+- **Runtime**: Python 3.12+
+- **Framework**: FastAPI
+- **Database**: MongoDB Atlas (PyMongo driver)
+- **Embeddings**: Voyage AI (`voyage-2` for text, `voyage-multimodal-3` for images)
+- **Reranking**: Voyage AI `rerank-2`
+- **LLM**: Claude Sonnet 4 via Thesys C1 API
+- **Storage**: Vercel Blob (screenshots)
+
+### Frontend
+- **Framework**: Next.js 15
+- **UI**: React 19 with Thesys C1 SDK
 - **Language**: TypeScript
-- **Framework**: Express
-- **Database**: MongoDB Atlas (official Node.js driver)
-- **Validation**: Zod
-- **Embeddings**: Voyage AI
-- **Storage**: S3 (stubbed for MVP Step 1)
+
+### Desktop App
+- **Framework**: Electron
+- **Language**: JavaScript/Node.js
 
 ## Environment Variables
 
-Create a `.env` file in the root directory with the following variables:
+Create a `.env` file in `my-c1-app/` with the following variables:
 
 ### Required
 
 - `MONGODB_URI` - MongoDB Atlas connection string
   - Example: `mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority`
-  - Get your connection string from MongoDB Atlas → Connect → Connect your application
 - `MONGODB_DB` - Database name (default: `w24h`)
 - `VOYAGE_API_KEY` - Voyage AI API key for embeddings
+- `BLOB_READ_WRITE_TOKEN` - Vercel Blob storage token
 
 ### Optional
 
-- `PORT` - Server port (default: `3000`)
 - `VOYAGE_TEXT_MODEL` - Voyage text embedding model (default: `voyage-2`)
-- `VOYAGE_IMAGE_MODEL` - Voyage image embedding model (default: `voyage-large-2`)
-
-See `.env.example` for a template (if available).
+- `VOYAGE_IMAGE_MODEL` - Voyage image embedding model (default: `voyage-multimodal-3`)
+- `VOYAGE_RERANK_MODEL` - Voyage reranking model (default: `rerank-2`)
 
 ## Setup
 
-1. **Install dependencies**:
+### Backend Setup
+
+1. **Navigate to backend directory**:
+   ```bash
+   cd my-c1-app/my-c1-project/backend
+   ```
+
+2. **Create virtual environment** (recommended):
+   ```bash
+   python3 -m venv myenv
+   source myenv/bin/activate  # On Windows: myenv\Scripts\activate
+   ```
+
+3. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configure environment variables**:
+   Create a `.env` file in `my-c1-app/` with the required variables (see above).
+
+5. **Run the server**:
+   ```bash
+   uvicorn main:app --reload
+   ```
+
+   The server will be available at http://localhost:8000
+
+### Frontend Setup
+
+1. **Navigate to frontend directory**:
+   ```bash
+   cd my-c1-app
+   ```
+
+2. **Install dependencies**:
    ```bash
    npm install
    ```
 
-2. **Configure environment variables**:
-   Create a `.env` file in the root directory with the required variables (see above).
-   
-   Example `.env` file:
-   ```env
-   MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
-   MONGODB_DB=w24h
-   VOYAGE_API_KEY=your-voyage-api-key
-   PORT=3000
-   ```
-
-3. **Configure MongoDB Atlas**:
-   - Ensure your MongoDB Atlas cluster is running (not paused)
-   - Add your IP address to the IP Access List in MongoDB Atlas
-     - Go to Network Access → Add IP Address
-     - For development, you can temporarily use `0.0.0.0/0` (allows all IPs - less secure)
-   - Verify your database user credentials in Database Access
-
-4. **Set up MongoDB Atlas Vector Search**:
-   - Create a vector search index in MongoDB Atlas UI
-   - Index name: `vector_search_text_embedding`
-   - Indexed field: `episodes.text_embedding`
-   - Dimensions: 1024 (for voyage-2 model)
-   - Similarity: cosine
-
-5. **Build the project**:
-   ```bash
-   npm run build
-   ```
-
-6. **Run the server**:
-   ```bash
-   npm start
-   ```
-   
-   Or for development with auto-reload:
+3. **Run the development server**:
    ```bash
    npm run dev
    ```
 
-## API Endpoints
+   The frontend will be available at http://localhost:3000
 
-### Health Check
+### Electron App Setup
 
-- `GET /health` - Server health status
+1. **Navigate to Electron app directory**:
+   ```bash
+   cd screenshot-app-electron-master
+   ```
 
-### Episodes
+2. **Install dependencies**:
+   ```bash
+   npm install
+   ```
 
-- `POST /api/episodes` - Create a new episode
-  - Request body: See `CreateEpisodeSchema` in `src/types.ts`
-  - Automatically generates text embedding from title + summary_text
-  - Returns: `{ episode_id, message }`
+3. **Configure backend URL**:
+   Update the server URL in the app configuration to point to your backend.
 
-- `GET /api/episodes/:episode_id` - Get episode by ID
-  - Returns: Episode document (without embedding vector)
-
-### Frames
-
-- `POST /api/frames` - Create a new frame (screenshot)
-  - Request body: See `CreateFrameSchema` in `src/types.ts`
-  - Requires either `s3_key` or `url`
-  - Automatically links frame to episode
-  - Returns: `{ frame_id, message }`
-
-- `GET /api/frames/:frame_id` - Get frame by ID
-  - Returns: Frame document (without embedding vector)
-
-### Query
-
-- `POST /api/query` - Query episodes using natural language
-  - Request body: `{ query: string, limit?: number, min_score?: number }`
-  - Uses vector search to find semantically similar episodes
-  - Returns: `{ query, results: Episode[], count }`
+4. **Run the app**:
+   ```bash
+   npm start
+   ```
 
 ## Database Schema
 
-### Episodes Collection
-
-```typescript
-{
-  _id: ObjectId,
-  episode_id: string (UUID),
-  start_ts: number (milliseconds),
-  end_ts: number (milliseconds),
-  title: string,
-  summary_text: string,
-  tags: {
-    project?: string,
-    app?: string,
-    url?: string,
-    branch?: string,
-    error_keywords?: string[]
-  },
-  frame_ids: string[] (UUIDs),
-  text_embedding: number[] | null,
-  created_at: Date,
-  updated_at: Date
-}
-```
-
 ### Frames Collection
 
-```typescript
+Frames represent individual screenshots captured by the Electron app.
+
+```javascript
 {
   _id: ObjectId,
   frame_id: string (UUID),
+  episode_id: string (UUID),  // Links to episode
+  ts: number (milliseconds timestamp),
+  app_name: string,
+  window_title: string (optional),
+  screenshot_path: string,
+  blob_url: string (optional),  // Vercel Blob URL
+  blob_pathname: string (optional),
+  file_size: number,
+  content_type: string,
+  image_embedding: number[] (optional),  // 1536 dimensions (voyage-multimodal-3)
+  created_at: Date
+}
+```
+
+### Episodes Collection
+
+Episodes group frames together when the user is working in the same application. A new episode starts automatically when the app name changes.
+
+```javascript
+{
+  _id: ObjectId,
   episode_id: string (UUID),
-  ts: number (milliseconds),
-  s3_key?: string,
-  url?: string,
-  caption?: string,
-  image_embedding: number[] | null,
+  app_name: string,
+  frame_ids: string[],  // Array of frame_id UUIDs
+  start_ts: number (milliseconds),
+  end_ts: number (milliseconds, nullable),
+  frame_count: number,
+  summary: string (optional),  // Auto-generated text summary
+  text_embedding: number[] (optional),  // 1024 dimensions (voyage-2)
   created_at: Date,
   updated_at: Date
 }
 ```
+
+## API Endpoints
+
+### Backend (FastAPI)
+
+- `GET /` - Health check
+- `POST /api/screenshot-upload` - Upload screenshot and create frame
+- `POST /api/activity` - Receive activity data from Electron app
+- `POST /chat` - Chat endpoint with semantic search context retrieval
+
+### Frontend (Next.js)
+
+- `POST /api/chat` - Chat API route
+- `POST /api/screenshot-upload` - Screenshot upload route
+- `GET /api/screenshots` - List screenshots
+- `GET /api/screenshots/metadata` - Get screenshot metadata
+
+## Semantic Search & Retrieval
+
+The system uses a two-stage retrieval process:
+
+1. **Initial Retrieval**: Cosine similarity search across top 50 most recent episodes and top 30 most recent frames
+2. **Reranking**: Voyage AI `rerank-2` model processes top 20 candidates to improve relevance
+3. **Context Assembly**: Relevant episodes (with summaries, timestamps, app names) and screenshots (with URLs) are formatted for the LLM
+
+### Technical Specifications
+
+- **Text Embeddings**: Voyage AI `voyage-2` (1024 dimensions)
+- **Image Embeddings**: Voyage AI `voyage-multimodal-3` (1536 dimensions)
+- **Reranker**: Voyage AI `rerank-2`
+- **Similarity Metric**: Cosine similarity (in-memory calculation)
+- **Query Performance**: ~500-1000ms end-to-end
 
 ## Project Structure
 
 ```
-src/
-  ├── index.ts          # Entry point
-  ├── app.ts            # Express app setup
-  ├── db.ts             # MongoDB connection
-  ├── voyage.ts         # Voyage AI embedding client
-  ├── types.ts          # TypeScript types and Zod schemas
-  └── routes/
-      ├── episodes.ts   # Episode endpoints
-      ├── frames.ts     # Frame endpoints
-      └── query.ts      # Query endpoint
+w24h/
+├── my-c1-app/
+│   ├── my-c1-project/
+│   │   └── backend/          # Python FastAPI backend
+│   │       ├── main.py       # FastAPI app and endpoints
+│   │       ├── llm_runner.py  # LLM chat logic with semantic search
+│   │       ├── db.py         # MongoDB connection
+│   │       ├── voyage.py     # Voyage AI embedding client
+│   │       └── ...
+│   └── src/                  # Next.js frontend
+│       └── app/
+│           └── api/           # API routes
+├── screenshot-app-electron-master/  # Electron desktop app
+│   └── src/
+│       ├── capture.js        # Screenshot capture
+│       └── activityTracker.js  # Activity tracking
+└── README.md
 ```
 
 ## Development
 
-- `npm run build` - Compile TypeScript
-- `npm run dev` - Run with auto-reload
-- `npm run type-check` - Type check without building
-- `npm start` - Run production build
+### Backend Development
+
+```bash
+cd my-c1-app/my-c1-project/backend
+source myenv/bin/activate  # Activate virtual environment
+uvicorn main:app --reload   # Run with auto-reload
+```
+
+### Frontend Development
+
+```bash
+cd my-c1-app
+npm run dev  # Run Next.js dev server
+```
+
+### Batch Processing
+
+To generate embeddings for existing frames and episodes:
+
+```bash
+cd my-c1-app/my-c1-project/backend
+python batch_embed.py
+```
 
 ## MongoDB Connection
 
-### Quick Connection Guide
+### Quick Setup
 
 1. **Get your MongoDB Atlas connection string**:
    - Go to [MongoDB Atlas](https://cloud.mongodb.com)
    - Navigate to your cluster → Click "Connect" → "Connect your application"
-   - Copy the connection string (format: `mongodb+srv://username:password@cluster.mongodb.net/`)
+   - Copy the connection string
 
-2. **Create `.env` file** in the project root:
+2. **Add to `.env` file**:
    ```env
    MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
    MONGODB_DB=w24h
-   VOYAGE_API_KEY=your-voyage-api-key
    ```
 
 3. **Configure MongoDB Atlas**:
-   - Ensure your cluster is **running** (not paused)
-   - Add your IP address to **Network Access** → IP Access List
+   - Ensure your cluster is running (not paused)
+   - Add your IP address to Network Access → IP Access List
    - Verify your database user has proper permissions
 
-4. **Test the connection**:
-   ```bash
-   npm run build
-   npm start
-   ```
-   The server will connect automatically on startup.
+### Indexes
 
-### DNS Configuration
-
-The application uses Google DNS (8.8.8.8, 8.8.4.4, 1.1.1.1) by default to resolve MongoDB SRV records. This helps avoid DNS resolution issues that can occur with some system DNS configurations. The DNS configuration is automatically set in `src/db.ts`.
-
-### Troubleshooting Connection Issues
-
-If you encounter connection errors:
-
-1. **DNS Resolution Errors**: The app automatically uses Google DNS. If issues persist:
-   - Verify your internet connection
-   - Check if MongoDB Atlas cluster is running (not paused)
-   - Verify the cluster hostname in your connection string
-
-2. **Connection Timeout**: 
-   - Check MongoDB Atlas IP Access List - your IP must be whitelisted
-   - Verify your username and password in the connection string
-   - Ensure the cluster is not paused (free tier clusters pause after inactivity)
-
-3. **Authentication Failed**:
-   - Verify database user credentials in MongoDB Atlas
-   - Check that the username and password in `MONGODB_URI` are correct
-   - Ensure the database user has appropriate permissions
+The system automatically creates the following indexes:
+- `frames.episode_id` (ascending)
+- `frames.ts` (descending)
+- `frames.app_name` (ascending)
+- `episodes.episode_id` (unique)
+- `episodes.app_name` (ascending)
+- `episodes.start_ts` (descending)
 
 ## Notes
 
-- Image embeddings are stubbed for MVP Step 1 (will throw "not implemented yet")
-- Vector search requires a properly configured index in MongoDB Atlas
-- The system falls back to text search if vector search is unavailable
-- UUIDs are auto-generated if not provided in requests
-- The application uses Google DNS for reliable MongoDB SRV record resolution
+- Screenshots are stored in Vercel Blob and automatically synced to MongoDB
+- Image embeddings are automatically generated when frames are uploaded (if blob_url is available)
+- Text embeddings and summaries are automatically generated when episodes are closed
+- The chat interface displays relevant screenshots inline using markdown image syntax
+- All embeddings are co-located with source data in MongoDB (no separate vector database needed)
 
-## Future Enhancements (Post-MVP)
+## Documentation
 
-- Image embedding support
-- Reranking with task-aware heuristics
-- Clarifying question generation
-- Handoff brief generation
-- Feedback loop for retrieval improvement
+- `my-c1-app/my-c1-project/backend/PROJECT_DESCRIPTION.md` - Project overview
+- `my-c1-app/my-c1-project/backend/TECHNICAL_SPECIFICATIONS.md` - Technical details
+- `my-c1-app/my-c1-project/backend/EMBEDDING_IMPLEMENTATION.md` - Embedding system details
+- `my-c1-app/my-c1-project/backend/SEMANTIC_SEARCH_IMPLEMENTATION.md` - Search implementation

@@ -3,6 +3,12 @@
     "dotenv": "^17.2.3"
   },
   "dependencies": {
-    "mongodb": "^7.0.0"
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.6",
+    "express": "^5.2.1",
+    "mongodb": "^7.0.0",
+    "uuid": "^13.0.0",
+    "voyageai": "^0.1.0",
+    "zod": "^4.3.5"
   }
 }

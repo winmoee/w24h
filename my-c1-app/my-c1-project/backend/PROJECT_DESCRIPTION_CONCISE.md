@@ -1,0 +1,10 @@
+# Project Description (Concise)
+
+Modern knowledge work is scattered across apps, tabs, terminals, and fleeting moments. When someone stops working—end of day, context switch, or team handoff—the next person wastes time reconstructing what happened: what the goal was, where things broke, which screen mattered, and what was supposed to happen next. Today this relies on memory, messy notes, or chat threads. Visual context is especially lost, and keyword search is too brittle to recover real intent.
+
+Our project builds a multimodal work memory that captures screenshots and activity signals during the day, structures them into meaningful "episodes," and makes them retrievable through an AI agent. A desktop Electron app automatically takes screenshots every minute, which are uploaded to Vercel Blob and linked to work episodes. Each episode and screenshot is embedded using Voyage AI (episodes: `voyage-2` model, 1024-dimensional text embeddings; screenshots: `voyage-multimodal-3` model, 1536-dimensional image embeddings) and stored in MongoDB Atlas with embeddings co-located alongside source data.
+
+At query time, a user asks natural language questions like "Where were we stuck before we left?" or "What did they mean by that button on the right?" The system embeds the query using `voyage-2`, performs cosine similarity search across the top 50 most recent episodes and top 30 most recent frames, reranks the top 20 candidates using Voyage AI `rerank-2`, and provides the AI agent with semantically-matched context including episode summaries, timestamps, and relevant screenshot URLs. The agent (Claude Sonnet 4) answers questions with relevant screenshots displayed inline using markdown image syntax, grounded in the retrieved visual and textual evidence.
+
+This turns messy human work into structured, multimodal memory. Instead of guessing what happened, users get grounded, evidence-backed answers with relevant screenshots in seconds. We make human work searchable, visual, and transferable—so context doesn't disappear when people log off.
+
